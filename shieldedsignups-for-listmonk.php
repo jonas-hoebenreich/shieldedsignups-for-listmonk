@@ -1,7 +1,7 @@
 <?php
 /**
  * Plugin Name: ShieldedSignups for Listmonk
- * Plugin URI: https://example.com/
+ * Plugin URI: https://shieldedsignups.jonh.eu/
  * Description: Turnstile-protected inline and popup newsletter forms that subscribe users to listmonk.
  * Version: 1.0.0
  * Author: ShieldedSignups

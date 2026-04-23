@@ -15,40 +15,62 @@ class SSFLM_Frontend
     const NONCE_ACTION = 'ssflm_nonce_action';
 
     /**
+     * Track whether shared frontend assets have been output for the page.
+     *
+     * @var bool
+     */
+    private $assets_output = false;
+
+    /**
+     * Track whether scripts have been enqueued for the page.
+     *
+     * @var bool
+     */
+    private $assets_enqueued = false;
+
+    /**
      * Constructor.
      */
     public function __construct()
     {
-        add_action('wp_enqueue_scripts', array($this, 'enqueue_assets'));
         add_shortcode('listmonk_form', array($this, 'render_shortcode'));
         add_action('wp_ajax_ssflm_subscribe', array($this, 'handle_subscribe_request'));
         add_action('wp_ajax_nopriv_ssflm_subscribe', array($this, 'handle_subscribe_request'));
     }
 
     /**
-     * Enqueue frontend assets.
+     * Enqueue frontend assets only when the shortcode is rendered.
+     *
+     * @param array $settings Plugin settings.
      */
-    public function enqueue_assets()
+    private function enqueue_assets($settings)
     {
-        $settings = get_option(self::OPTION_KEY, array());
+        if ($this->assets_enqueued) {
+            return;
+        }
 
-        wp_register_style('ssflm-styles', false, array(), '1.0.0');
-        wp_enqueue_style('ssflm-styles');
-        wp_add_inline_style('ssflm-styles', $this->get_inline_styles());
+        $script_dependencies = array();
+
+        if (!empty($settings['turnstile_site_key']) && !wp_script_is('ssflm-turnstile', 'registered')) {
+            wp_register_script(
+                'ssflm-turnstile',
+                'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit',
+                array(),
+                null,
+                true
+            );
+        }
+
+        if (!empty($settings['turnstile_site_key'])) {
+            wp_enqueue_script('ssflm-turnstile');
+            $script_dependencies[] = 'ssflm-turnstile';
+        }
 
         wp_enqueue_script(
             'ssflm-form-handler',
             SSFLM_PLUGIN_URL . 'assets/js/form-handler.js',
-            array(),
+            $script_dependencies,
             '1.0.0',
-            true
-        );
-
-        wp_enqueue_script(
-            'ssflm-turnstile',
-            'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit',
-            array(),
-            null,
             true
         );
 
@@ -61,6 +83,8 @@ class SSFLM_Frontend
                 'siteKey' => isset($settings['turnstile_site_key']) ? $settings['turnstile_site_key'] : '',
             )
         );
+
+        $this->assets_enqueued = true;
     }
 
     /**
@@ -71,16 +95,21 @@ class SSFLM_Frontend
      */
     public function render_shortcode($atts)
     {
+        $settings = get_option(self::OPTION_KEY, array());
+
         $atts = shortcode_atts(
             array(
                 'type' => 'inline',
+                'list' => '',
                 'attributes' => '{}',
-                'headline' => 'Join Our Newsletter',
-                'description' => 'No spam. Just meaningful updates.',
-                'buttontext' => 'Join Newsletter',
-                'thankyou_title' => 'Thank You!',
-                'thankyou_message' => 'Please click the confirmation link in the email we just sent.',
-                'variables' => '',
+                'trackurl' => 'false',
+                'headline' => __('Join Our Newsletter', 'shieldedsignups-for-listmonk'),
+                'description' => __('No spam. Just meaningful updates.', 'shieldedsignups-for-listmonk'),
+                'buttontext' => __('Join Newsletter', 'shieldedsignups-for-listmonk'),
+                'legal' => __('By subscribing, you agree to our {privacy policy}. You can opt out at any time.', 'shieldedsignups-for-listmonk'),
+                'thankyou_title' => __('Thank You!', 'shieldedsignups-for-listmonk'),
+                'thankyou_message' => __('Please click the confirmation link in the email we just sent.', 'shieldedsignups-for-listmonk'),
+                'custom_css' => '',
             ),
             $atts,
             'listmonk_form'
@@ -91,49 +120,85 @@ class SSFLM_Frontend
         if (!is_array($attributes_data)) {
             $attributes_data = array();
         }
-        $attributes = wp_json_encode($attributes_data);
+        $track_url = filter_var($atts['trackurl'], FILTER_VALIDATE_BOOLEAN);
+        $attributes = wp_json_encode($this->sanitize_attributes($attributes_data));
         $headline = sanitize_text_field($atts['headline']);
         $description = sanitize_text_field($atts['description']);
         $buttontext = sanitize_text_field($atts['buttontext']);
+        $legal = sanitize_text_field($atts['legal']);
         $thankyou_title = sanitize_text_field($atts['thankyou_title']);
         $thankyou_message = sanitize_text_field($atts['thankyou_message']);
-        $variables = sanitize_text_field($atts['variables']);
+        $custom_css = $this->sanitize_custom_css($atts['custom_css']);
+        $default_list_id = isset($settings['list_id']) ? absint($settings['list_id']) : 0;
+        $requested_list_id = absint($atts['list']);
+        $list_id = $requested_list_id > 0 ? $requested_list_id : $default_list_id;
+        $form_nonce = wp_create_nonce($this->build_form_nonce_action($list_id));
+
+        $this->enqueue_assets($settings);
 
         ob_start();
+        if (!$this->assets_output) {
+            echo '<style id="ssflm-styles">' . $this->get_inline_styles() . '</style>';
+            $this->assets_output = true;
+        }
+
+        if (!empty($custom_css)) {
+            echo '<style id="' . wp_unique_id("ssflm-custom-css") . '">' . $custom_css . '</style>';
+        }
+
         if ('popup' === $type):
             ?>
             <div class="ssflm-popup-container" aria-hidden="true">
                 <div class="ssflm-popup-backdrop"></div>
                 <div class="ssflm-panel ssflm-panel-popup" role="dialog" aria-modal="true" aria-label="Newsletter signup">
                     <button class="ssflm-popup-close" type="button" aria-label="Close popup">&times;</button>
-                    <?php $this->render_form_markup($type, $attributes, $headline, $description, $buttontext, $thankyou_title, $thankyou_message, $variables); ?>
+                    <?php $this->render_form_markup($type, $attributes, $track_url, $headline, $description, $buttontext, $legal, $thankyou_title, $thankyou_message, $list_id, $form_nonce); ?>
                 </div>
             </div>
             <?php
         else:
             ?>
             <div class="ssflm-panel ssflm-panel-inline">
-                <?php $this->render_form_markup($type, $attributes, $headline, $description, $buttontext, $thankyou_title, $thankyou_message, $variables); ?>
+                <?php $this->render_form_markup($type, $attributes, $track_url, $headline, $description, $buttontext, $legal, $thankyou_title, $thankyou_message, $list_id, $form_nonce); ?>
             </div>
             <?php
         endif;
 
         return ob_get_clean();
     }
-
+    
     /**
      * Shared form markup.
      */
-    private function render_form_markup($type, $attributes, $headline, $description, $buttontext, $thankyou_title, $thankyou_message, $variables)
+    private function render_form_markup($type, $attributes, $track_url, $headline, $description, $buttontext, $legal, $thankyou_title, $thankyou_message, $list_id, $form_nonce)
     {
-        $name_id = uniqid('ssflm_name_', false);
-        $email_id = uniqid('ssflm_email_', false);
-        $style = '';
-        if (!empty($variables)) {
-            $style = 'style="' . esc_attr($variables) . '"';
+        $name_id = wp_unique_id('ssflm_name_');
+        $email_id = wp_unique_id('ssflm_email_');
+        $privacy_policy_url = get_privacy_policy_url();
+        $legal_parts = preg_split('/\{([^{}]+)\}/', (string) $legal, -1, PREG_SPLIT_DELIM_CAPTURE);
+        $legal_content = '';
+        if (is_array($legal_parts)) {
+            foreach ($legal_parts as $index => $part) {
+                if (0 === $index % 2) {
+                    $legal_content .= esc_html($part);
+                    continue;
+                }
+
+                $link_text = trim($part);
+                if ('' === $link_text) {
+                    continue;
+                }
+
+                if (!empty($privacy_policy_url)) {
+                    $legal_content .= '<a href="' . esc_url($privacy_policy_url) . '" rel="nofollow">' . esc_html($link_text) . '</a>';
+                } else {
+                    $legal_content .= esc_html($link_text);
+                }
+            }
         }
         ?>
-        <form class="ssflm-form" method="post" data-form-type="<?php echo esc_attr($type); ?>" <?php echo $style; ?>>
+        <form class="ssflm-form" method="post" data-form-type="<?php echo esc_attr($type); ?>"
+            data-track-url="<?php echo $track_url ? '1' : '0'; ?>">
             <h3 class="ssflm-title"><?php echo esc_html($headline); ?></h3>
             <p class="ssflm-subtitle"><?php echo esc_html($description); ?></p>
 
@@ -158,7 +223,13 @@ class SSFLM_Frontend
                 </div>
             </div>
 
+            <small
+                class="ssflm-legal"><?php echo wp_kses($legal_content, array('a' => array('href' => array(), 'rel' => array()))); ?></small>
+
+
             <input type="hidden" name="attributes" value="<?php echo esc_attr($attributes); ?>" />
+            <input type="hidden" name="list_id" value="<?php echo esc_attr((string) absint($list_id)); ?>" />
+            <input type="hidden" name="nonce" value="<?php echo esc_attr($form_nonce); ?>" />
             <div class="ssflm-message" role="status" aria-live="polite"></div>
             <div class="ssflm-turnstile"></div>
         </form>
@@ -174,7 +245,9 @@ class SSFLM_Frontend
      */
     public function handle_subscribe_request()
     {
-        if (!check_ajax_referer(self::NONCE_ACTION, 'nonce', false)) {
+        $requested_list_id = isset($_POST['list_id']) ? absint(wp_unslash($_POST['list_id'])) : 0;
+
+        if (!check_ajax_referer($this->build_form_nonce_action($requested_list_id), 'nonce', false)) {
             wp_send_json_error(
                 array(
                     'code' => 'invalid_nonce',
@@ -200,6 +273,8 @@ class SSFLM_Frontend
         }
 
         $settings = get_option(self::OPTION_KEY, array());
+        $target_list_id = $requested_list_id > 0 ? $requested_list_id : (isset($settings['list_id']) ? absint($settings['list_id']) : 0);
+
         if (empty($settings['turnstile_secret_key'])) {
             wp_send_json_error(
                 array(
@@ -226,12 +301,14 @@ class SSFLM_Frontend
             $attributes = array();
         }
 
+        $attributes = $this->sanitize_attributes($attributes);
+
         $listmonk = new SSFLM_Listmonk_API($settings);
         $result = $listmonk->subscribe(
             $email,
             $name,
             $attributes,
-            isset($settings['list_id']) ? absint($settings['list_id']) : 0
+            $target_list_id
         );
 
         if (is_wp_error($result)) {
@@ -240,8 +317,11 @@ class SSFLM_Frontend
             $status = 500;
 
             if ('email_exists' === $code) {
-                $status = 409;
-                $message = __('Email already exists.', 'shieldedsignups-for-listmonk');
+                wp_send_json_success(
+                    array(
+                        'message' => __('Thank you for subscribing!', 'shieldedsignups-for-listmonk'),
+                    )
+                );
             } elseif ('connection_failed' === $code) {
                 $status = 502;
                 $message = __('Connection to listmonk failed.', 'shieldedsignups-for-listmonk');
@@ -261,6 +341,79 @@ class SSFLM_Frontend
                 'message' => __('Thank you for subscribing!', 'shieldedsignups-for-listmonk'),
             )
         );
+    }
+
+    /**
+     * Sanitize subscriber attributes recursively.
+     *
+     * @param mixed $attributes Raw attributes payload.
+     * @param int   $depth Current recursion depth.
+     * @return array
+     */
+    private function sanitize_attributes($attributes, $depth = 0)
+    {
+        if (!is_array($attributes) || $depth > 5) {
+            return array();
+        }
+
+        $sanitized = array();
+        foreach ($attributes as $key => $value) {
+            if (count($sanitized) >= 50) {
+                break;
+            }
+
+            $sanitized_key = is_string($key) ? preg_replace('/[^a-zA-Z0-9_.-]/', '', $key) : '';
+            if (empty($sanitized_key)) {
+                continue;
+            }
+
+            $sanitized_key = substr($sanitized_key, 0, 64);
+
+            if (is_array($value)) {
+                $sanitized[$sanitized_key] = $this->sanitize_attributes($value, $depth + 1);
+                continue;
+            }
+
+            if (is_bool($value) || is_int($value) || is_float($value)) {
+                $sanitized[$sanitized_key] = $value;
+                continue;
+            }
+
+            if (null === $value) {
+                $sanitized[$sanitized_key] = '';
+                continue;
+            }
+
+            $sanitized[$sanitized_key] = sanitize_text_field((string) $value);
+
+            if ('source_url' === $sanitized_key) {
+                $url_value = esc_url_raw((string) $value, array('http', 'https'));
+                if (!empty($url_value)) {
+                    $sanitized[$sanitized_key] = $url_value;
+                }
+            }
+        }
+
+        return $sanitized;
+    }
+
+    /**
+     * Sanitize custom CSS from shortcode attributes.
+     *
+     * @param mixed $custom_css Raw custom CSS.
+     * @return string
+     */
+    private function sanitize_custom_css($custom_css)
+    {
+        if (!is_scalar($custom_css)) {
+            return '';
+        }
+
+        $custom_css = wp_unslash((string) $custom_css);
+        $custom_css = wp_strip_all_tags($custom_css);
+        $custom_css = trim($custom_css);
+
+        return $custom_css;
     }
 
     /**
@@ -295,6 +448,17 @@ class SSFLM_Frontend
     }
 
     /**
+     * Build nonce action for a specific list id.
+     *
+     * @param int $list_id Target list id.
+     * @return string
+     */
+    private function build_form_nonce_action($list_id)
+    {
+        return self::NONCE_ACTION . '|' . absint($list_id);
+    }
+
+    /**
      * Inline CSS.
      *
      * @return string
@@ -305,20 +469,18 @@ class SSFLM_Frontend
 			:root {
 				--ssflm-primary: #0f766e;
 				--ssflm-text: #0a0a0a;
-				--ssflm-surface: #99afe333;
+				--ssflm-surface: #e7ebf6;
 				--ssflm-border: #0f1728fd;
 				--ssflm-input-background: #f1f1f1fd;
 				--ssflm-input-color: var(--ssflm-text);
                 --ssflm-danger: #710505;
 			}
 			.ssflm-panel {
-				width: min(100%, 480px);
+				width: 100%;
 				padding: 1.5rem;
 				border-radius: 16px;
 				border: 1px solid var(--ssflm-border);
 				background: var(--ssflm-surface);
-				backdrop-filter: blur(10px);
-				-webkit-backdrop-filter: blur(10px);
 				color: var(--ssflm-text);
 				animation: ssflm-pop 0.4s ease;
 			}
@@ -366,7 +528,8 @@ class SSFLM_Frontend
 				font-size: 0.95rem;
 			}
 			.ssflm-input::placeholder {
-				color: rgba(255, 255, 255, 0.5);
+				color: var(--ssflm-text);
+                opacity: 0.7;
 			}
 			.ssflm-form input.ssflm-input:focus {
 				outline: none;
@@ -400,6 +563,12 @@ class SSFLM_Frontend
 			.ssflm-turnstile {
 				margin-top: 0.5rem;
 			}
+            .ssflm-legal {
+                display: block;
+                margin-top: 0.4rem;
+                font-size: 0.75rem;
+                line-height: 1.35;
+            }
 			.ssflm-message {
 				min-height: 1.2em;
 				font-size: 0.85rem;
@@ -423,27 +592,27 @@ class SSFLM_Frontend
 				display: grid;
 			}
 			.ssflm-popup-backdrop {
-				position: absolute;
+				position: fixed;
 				inset: 0;
-				background: rgba(2, 6, 23, 0.6);
-				backdrop-filter: blur(3px);
+				background: rgba(2, 6, 23, 0.8);
+				backdrop-filter: blur(10px);
 			}
 			.ssflm-panel-popup {
 				position: relative;
 				z-index: 2;
 			}
-			.ssflm-popup-close {
-				position: absolute;
-				right: 0.5rem;
-				top: 0.5rem;
-				font-size: 1.5rem;
-				line-height: 1;
-				border: 0;
-				background: transparent;
-				color: rgba(255, 255, 255, 0.7);
-				cursor: pointer;
-				transition: color 0.2s ease;
-			}
+            .ssflm-popup-close {
+                position: fixed;
+                right: 1rem;
+                top: 1rem;
+                font-size: 2.5rem;
+                line-height: 1;
+                border: 0;
+                background: transparent;
+                color: rgba(255, 255, 255, 0.7);
+                cursor: pointer;
+                transition: color 0.2s ease;
+            }
 			.ssflm-popup-close:hover {
 				color: #ffffff;
 			}

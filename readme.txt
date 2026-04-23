@@ -47,6 +47,9 @@ Add one of the following shortcodes to any post, page, or widget:
 - Popup form:
   `[listmonk_form type="popup"]`
 
+- Use a specific list ID (defaults to the configured Target List ID when omitted):
+  `[listmonk_form type="inline" list="3"]`
+
 Optional attributes payload (JSON string) can be passed with:
 
 `[listmonk_form type="inline" attributes="{\"source\":\"wordpress\"}"]`
@@ -54,6 +57,12 @@ Optional attributes payload (JSON string) can be passed with:
 Customize the success state text with:
 
 `[listmonk_form type="inline" thankyou_title="You're in!" thankyou_message="Check your inbox and click the confirmation link."]`
+
+Add custom CSS for a specific shortcode instance with:
+
+`[listmonk_form type="inline" custom_css=".ssflm-panel { border-color: #123456; }"]`
+
+Frontend styles and scripts are only loaded on pages where the shortcode is rendered.
 
 == Frequently Asked Questions ==
 

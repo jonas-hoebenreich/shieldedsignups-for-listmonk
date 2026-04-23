@@ -17,6 +17,7 @@
     exitIntentBound: false,
     widgetIds: new Map(),
     pendingSubmissions: new WeakSet(),
+    popupTriggers: new WeakMap(),
   };
 
   function init() {
@@ -32,7 +33,7 @@
     }
 
     setTimeout(() => {
-      openPopup(popupContainer);
+      openPopup(popupContainer, "timer");
     }, 5000);
 
     if (!state.exitIntentBound) {
@@ -42,7 +43,7 @@
         }
 
         if (event.clientY <= 10) {
-          openPopup(popupContainer);
+          openPopup(popupContainer, "exit_intent");
         }
       });
       state.exitIntentBound = true;
@@ -53,24 +54,34 @@
         event.target.matches(selectors.popupBackdrop) ||
         event.target.matches(selectors.popupClose)
       ) {
-        closePopup(popupContainer);
+        closePopup(popupContainer, "dismiss");
       }
     });
   }
 
-  function openPopup(container) {
+  function openPopup(container, trigger = "manual") {
     if (state.popupShown || !container) {
       return;
     }
     container.classList.add("is-active");
     state.popupShown = true;
+    state.popupTriggers.set(container, trigger);
+    trackEvent("popup_open", {
+      form_type: "popup",
+      trigger,
+    });
   }
 
-  function closePopup(container) {
+  function closePopup(container, reason = "close") {
     if (!container) {
       return;
     }
     container.classList.remove("is-active");
+    trackEvent("popup_close", {
+      form_type: "popup",
+      reason,
+      trigger: state.popupTriggers.get(container) || "manual",
+    });
   }
 
   function renderTurnstileWidgets() {
@@ -141,7 +152,10 @@
 
           const payload = new FormData();
           payload.append("action", "ssflm_subscribe");
-          payload.append("nonce", config.nonce || "");
+          const nonceField = form.querySelector('[name="nonce"]');
+          const listField = form.querySelector('[name="list_id"]');
+          payload.append("nonce", nonceField ? nonceField.value || "" : "");
+          payload.append("list_id", listField ? listField.value || "0" : "0");
           payload.append(
             "email",
             form.querySelector('[name="email"]').value || "",
@@ -157,9 +171,17 @@
           payload.append("turnstile_token", token);
 
           const attributesField = form.querySelector('[name="attributes"]');
+          const attributesPayload = buildAttributesPayload(
+            form,
+            attributesField,
+          );
           if (attributesField) {
-            payload.append("attributes", attributesField.value || "{}");
+            payload.append("attributes", attributesPayload);
           }
+
+          trackEvent("submit_attempt", {
+            form_type: form.getAttribute("data-form-type") || "inline",
+          });
 
           const response = await fetch(config.ajaxUrl, {
             method: "POST",
@@ -182,12 +204,23 @@
             ) {
               window.turnstile.reset(widgetId);
             }
+            trackEvent("submit_error", {
+              form_type: form.getAttribute("data-form-type") || "inline",
+              reason: "request_failed",
+            });
             return;
           }
 
           runSuccessTransition(form);
+          trackEvent("submit_success", {
+            form_type: form.getAttribute("data-form-type") || "inline",
+          });
         } catch (error) {
           setMessage(form, "Connection to listmonk failed.", "error");
+          trackEvent("submit_error", {
+            form_type: form.getAttribute("data-form-type") || "inline",
+            reason: "network_error",
+          });
         } finally {
           setLoadingState(form, false);
           state.pendingSubmissions.delete(form);
@@ -246,9 +279,116 @@
     setTimeout(() => {
       const popupContainer = panel.closest(selectors.popupContainer);
       if (popupContainer) {
-        closePopup(popupContainer);
+        closePopup(popupContainer, "success");
       }
     }, 3500);
+  }
+
+  function buildAttributesPayload(form, attributesField) {
+    const baseAttributes = parseAttributes(
+      attributesField ? attributesField.value : "{}",
+    );
+
+    if (isTrackUrlEnabled(form)) {
+      const sourceUrl = getCurrentPageUrl();
+      if (sourceUrl) {
+        baseAttributes.source_url = sourceUrl;
+      }
+    }
+
+    try {
+      return JSON.stringify(baseAttributes);
+    } catch (error) {
+      return "{}";
+    }
+  }
+
+  function parseAttributes(rawValue) {
+    if (!rawValue || typeof rawValue !== "string") {
+      return {};
+    }
+
+    try {
+      const parsed = JSON.parse(rawValue);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        return {};
+      }
+      return parsed;
+    } catch (error) {
+      return {};
+    }
+  }
+
+  function isTrackUrlEnabled(form) {
+    if (!form) {
+      return false;
+    }
+    return form.getAttribute("data-track-url") === "1";
+  }
+
+  function getCurrentPageUrl() {
+    try {
+      const current = new URL(window.location.href);
+      if (current.protocol !== "http:" && current.protocol !== "https:") {
+        return "";
+      }
+      current.hash = "";
+      return current.toString();
+    } catch (error) {
+      return "";
+    }
+  }
+
+  function trackEvent(action, details = {}) {
+    const payload = {
+      category: "ShieldedSignups",
+      action,
+      details,
+      page_url: getCurrentPageUrl(),
+      timestamp: Date.now(),
+    };
+
+    // Native hook for custom analytics integrations.
+    try {
+      document.dispatchEvent(
+        new CustomEvent("ssflm:tracking", { detail: payload }),
+      );
+    } catch (error) {
+      // Ignore analytics dispatch failures.
+    }
+
+    // Matomo support via the global _paq queue.
+    if (Array.isArray(window._paq)) {
+      window._paq.push([
+        "trackEvent",
+        payload.category,
+        payload.action,
+        JSON.stringify(payload.details || {}),
+      ]);
+    }
+
+    // Google Analytics (gtag.js) compatibility.
+    if (typeof window.gtag === "function") {
+      window.gtag("event", payload.action, {
+        event_category: payload.category,
+        event_label: JSON.stringify(payload.details || {}),
+      });
+    }
+
+    // Generic GTM/dataLayer integration.
+    if (Array.isArray(window.dataLayer)) {
+      window.dataLayer.push({
+        event: "ssflm_" + payload.action,
+        ssflm: payload,
+      });
+    }
+
+    // Plausible compatibility if loaded.
+    if (typeof window.plausible === "function") {
+      window.plausible("SSFLM " + payload.action, {
+        props: payload.details || {},
+      });
+    }
   }
 
   document.addEventListener("DOMContentLoaded", init);
