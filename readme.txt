@@ -1,6 +1,6 @@
 === ShieldedSignups for Listmonk ===
 Contributors: flinnn
-Tags: newsletter, listmonk, cloudflare, turnstile, popup, signup
+Tags: newsletter, listmonk, turnstile, signup
 Requires at least: 5.8
 Tested up to: 6.9
 Requires PHP: 7.4

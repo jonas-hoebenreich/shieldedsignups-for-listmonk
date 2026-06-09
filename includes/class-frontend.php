@@ -166,7 +166,7 @@ class SSFLM_Frontend
 
         return ob_get_clean();
     }
-    
+
     /**
      * Shared form markup.
      */
